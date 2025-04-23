@@ -8,7 +8,8 @@ This repository contains the R Markdown notebook used for the analyses in the st
 
 - **`Analysis_Notebook.Rmd`**: Main analysis notebook, including data processing, phylogenetic comparative methods, and visualization of results.
 - **`Grafted_Tree_Preparation.Rmd`**: Notebook for preparing grafted tree with full species set.
-- **`Methylation_level.csv`**: Data on 5-methylcytosine CpG methylation values and regeneration categories for 175 species
+- **`Methylation_level.csv`**: Data on 5-methylcytosine CpG methylation values and regeneration categories for 175 species.
+- **`Newick Tree files`**: For the time-calibrated (scaled) tree of and the tree prepared by grafting the remaining species.
 
 ## Description
 
