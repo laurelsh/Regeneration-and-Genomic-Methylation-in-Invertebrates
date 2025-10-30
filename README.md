@@ -2,20 +2,6 @@
 
 This repository contains the data and R scripts used to analyze relationships between genome-wide CpG methylation and regenerative capacity across metazoans.
 
----
-
-## Repository Contents
-
-├── data/
-│   ├── Full_topology.nwk         # Reference topology for grafting missing taxa
-│   ├── Methylation_data.csv      # Species-level CpG methylation and regeneration dataset (1–3 categories)
-│   ├── Tree_calibrated.nwk       # 119-tip calibrated tree
-│   └── Tree_grafted.nwk          # 175-tip grafted tree (output of grafting script)
-├── Grafted_Tree_Preparation.R    # Builds the grafted tree
-├── PGLS_analysis.R               # Runs PGLS analyses on either tree
-└── README.md                     # Overview and instructions
-
----
 
 ## Overview
 
