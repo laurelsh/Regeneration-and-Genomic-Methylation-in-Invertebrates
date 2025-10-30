@@ -1,51 +1,81 @@
-# Analysis of DNA Methylation and Regenerative Capacity in Invertebrates
+# Phylogenetic Comparative Analysis — Regeneration and CpG Methylation
 
-This repository contains the R Markdown notebook used for the analyses in the study:
+This repository contains the data and R scripts used to analyze relationships between genome-wide CpG methylation and regenerative capacity across metazoans.
 
-**"Regeneration and Genomic Methylation in Invertebrates: Insights into Epigenome Evolution and Cell Lineage Plasticity."**
+---
 
 ## Repository Contents
 
-- **`Analysis_Notebook.Rmd`**: Main analysis notebook, including data processing, phylogenetic comparative methods, and visualization of results.
-- **`Grafted_Tree_Preparation.Rmd`**: Notebook for preparing grafted tree with full species set.
-- **`Methylation_level.csv`**: Data on 5-methylcytosine CpG methylation values and regeneration categories for 175 species.
-- **`Newick Tree files`**: For the time-calibrated (scaled) tree of and the tree prepared by grafting the remaining species.
+├── data/
+│   ├── Full_topology.nwk         # Reference topology for grafting missing taxa
+│   ├── Methylation_data.csv      # Species-level CpG methylation and regeneration dataset (1–3 categories)
+│   ├── Tree_calibrated.nwk       # 119-tip calibrated tree
+│   └── Tree_grafted.nwk          # 175-tip grafted tree (output of grafting script)
+├── Grafted_Tree_Preparation.R    # Builds the grafted tree
+├── PGLS_analysis.R               # Runs PGLS analyses on either tree
+└── README.md                     # Overview and instructions
 
-## Description
+---
 
-The Analysis notebook analyzes genome-wide CpG methylation levels in relation to regenerative capacity across invertebrate species. It includes:
-- Data import and preprocessing
-- Phylogenetic signal testing (Pagel's λ, Blomberg’s K)
-- Phylogenetic Generalized Least Squares (PGLS) analysis
-- Visualization of results (phylogenetic trees, scatter plots)
-  
-The Grafting notebook prepares the full tree from the time-calibrated tree and taxonomy information to determine the rest of the species placements
-- 
+## Overview
 
-## Requirements
+### **1. Grafted_Tree_Preparation.R**
+Constructs a complete 175-tip phylogeny by grafting additional taxa from the full topology (`Full_topology.nwk`) onto the calibrated tree (`Tree_calibrated.nwk`).
 
-- Suggested packages:
-  - `ape`
-  - `phytools`
-  - `nlme`
-  - `caper`
-  - `ggplot2`
-  - `dplyr`
-  - `readr`
+Main steps:
+1. Retrieve taxonomy for existing and missing taxa via GBIF.
+2. Label internal nodes by rank (Family, Order, Class, Phylum).
+3. Estimate clade-specific speciation rates using Yule models.
+4. Graft new taxa to the most appropriate nodes.
+5. Save the resulting tree as `data/Tree_grafted.nwk`.
 
-### Install required packages:
+**Required R packages:**
+`ape`, `phytools`, `diversitree`, `treeio`, `ggtree`,  
+`rgbif`, `dplyr`, `pbapply`, `stringr`.
 
-```r
-install.packages(c("ape", "phytools", "nlme", "caper", "ggplot2", "dplyr", "readr"))
-```
+---
 
-## How to Run
+### **2. PGLS_analysis.R**
+Performs Phylogenetic Generalized Least Squares (PGLS) tests to examine the relationship between CpG methylation and regenerative capacity.
 
-	1.	Open Analysis_Notebook.Rmd in RStudio.
-	2.	Knit the document or run chunks step-by-step to reproduce the analysis.
+Main steps:
+1. Load either the calibrated or grafted tree (`Tree_calibrated.nwk` or `Tree_grafted.nwk`).
+2. Align tree tips with data (`Methylation_data.csv`).
+3. Apply a Tukey transformation to methylation values.
+4. Fit PGLS models using Pagel’s λ correlation structure.
+5. Compute estimated marginal means and pairwise contrasts.
+6. Save results to a `results/` folder, including plots and CSV tables.
+
+**Required R packages:**
+`ape`, `phytools`, `nlme`, `emmeans`, `dplyr`,  
+`ggplot2`, `rcompanion`, `nortest`, `moments`.
+
+---
+
+## How to Run the Scripts
+
+1. **Download or clone this repository** to your computer.  
+   You can click the green **Code → Download ZIP** button on GitHub, then extract it anywhere on your computer.
+
+2. **Open R or RStudio** and set your working directory to the project folder:
+   ```r
+   setwd("path/to/Phylogenetic_comparative_analysis")
+
+   Outputs
+	•	data/Tree_grafted.nwk — new 175-tip phylogeny
+	•	results/ — automatically generated folder containing:
+	•	PGLS_calibrated.pdf
+	•	PGLS_grafted.pdf
+	•	Contrasts_*.csv
+	•	Summary_*.csv
 
 ## Citation
 
-If you use this code, please cite:
+If using or adapting this repository, please cite:
 
-Hiebert and Yi. Regeneration and Genomic Methylation in Invertebrates: Insights into Epigenome Evolution and Cell Lineage Plasticity. (2025) [Journal Name, DOI]
+Hiebert, L. and Yi, S. PNAS (2025, in revision).
+
+## License
+
+All scripts are released under the MIT License.
+Data files are provided under CC-BY 4.0, allowing reuse with attribution.
