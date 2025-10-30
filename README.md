@@ -2,6 +2,7 @@
 
 This repository contains the data and R scripts used to analyze relationships between genome-wide CpG methylation and regenerative capacity across metazoans.
 
+---
 
 ## Overview
 
@@ -37,23 +38,6 @@ Main steps:
 `ggplot2`, `rcompanion`, `nortest`, `moments`.
 
 ---
-
-## How to Run the Scripts
-
-1. **Download or clone this repository** to your computer.  
-   You can click the green **Code → Download ZIP** button on GitHub, then extract it anywhere on your computer.
-
-2. **Open R or RStudio** and set your working directory to the project folder:
-   ```r
-   setwd("path/to/Phylogenetic_comparative_analysis")
-
-   Outputs
-	•	data/Tree_grafted.nwk — new 175-tip phylogeny
-	•	results/ — automatically generated folder containing:
-	•	PGLS_calibrated.pdf
-	•	PGLS_grafted.pdf
-	•	Contrasts_*.csv
-	•	Summary_*.csv
 
 ## Citation
 
