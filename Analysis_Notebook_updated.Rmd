@@ -1,1033 +1,268 @@
+###############################################################################
 # Phylogenetic Comparative Analysis Script For Determining Relationship Between Genomic Methylation and Regeneration
-
-## Step 0: Setup Environment & Libraries
-
-```{r}
 ###############################################################################
-# Step 0: Setup Environment & Libraries ----------------------------------------
-###############################################################################
-# List of required packages
-needed_pkgs <- c(
-  "ape", "phytools", "phylolm", "caper", "car", "ggplot2",
-  "phylosignal", "OUwie", "geiger", "gridExtra", "logging", "moments",
-  "moments", "tseries", "stats", "rcompanion", "nortest", "dplyr"
-)
 
-# Install any missing packages
-installed_pkgs <- installed.packages()[, "Package"]
-missing_pkgs <- setdiff(needed_pkgs, installed_pkgs)
-
-if(length(missing_pkgs) > 0){
-  install.packages(missing_pkgs, dependencies = TRUE)
-}
-
-# Load all required packages with suppressed startup messages
 suppressPackageStartupMessages({
-  lapply(needed_pkgs, library, character.only = TRUE)
+  library(ape); library(phytools); library(nlme)
+  library(emmeans); library(car); library(dplyr)
+  library(rcompanion); library(nortest); library(moments)
+  library(ggplot2)
+  okCairo <- requireNamespace("Cairo", quietly = TRUE)
 })
-
-# Initialize logging
-basicConfig()
-addHandler(writeToFile, file="analysis.log")
-
-# Set seed for reproducibility
 set.seed(123)
-```
 
-## Step 1: Define Input Files and Options
-
-```{r}
 ###############################################################################
-# Step 1: Define Input Files and Options ---------------------------------------
+# 0) Inputs
 ###############################################################################
-# Define file paths
+base_dir <- "/Users/laurelhiebert/Documents/07. 2024-2025_YiLab_UCSB/04. Review MS/Phylogenetic_comparative_analysis"
 
-tree_file <- "/Users/laurelhiebert/Documents/10. Project Scientist Yi Lab/04. Review MS/Phylogenetic_comparative_analysis/Scaled_tree.nwk"
+tree_calibrated_file <- file.path(base_dir, "Scaled_tree.nwk")                         # 119-tip calibrated tree
+tree_grafted_file    <- file.path(base_dir, "grafting", "final_grafted_tree.newick")  # 175-tip grafted tree
+data_file            <- file.path(base_dir, "Methylation_data.csv")
 
-tree_grafted_file <- "/Users/laurelhiebert/Documents/10. Project Scientist Yi Lab/04. Review MS/Phylogenetic_comparative_analysis/grafting/final_grafted_tree.newick"
+out_dir  <- file.path(base_dir, "figures")  # output folder for all SI tables + figs + trees
+if (!dir.exists(out_dir)) dir.create(out_dir, recursive = TRUE)
 
-data_file  <- "/Users/laurelhiebert/Documents/10. Project Scientist Yi Lab/04. Review MS/Phylogenetic_comparative_analysis/Methylation_level.csv"
+stopifnot(file.exists(tree_calibrated_file),
+          file.exists(tree_grafted_file),
+          file.exists(data_file))
 
-```
+cat("\nUsing base directory:\n", base_dir, "\nOutputs will be written to:\n", out_dir, "\n\n")
 
-## Step 2: Load & Inspect Data
-
-```{r}
 ###############################################################################
-# Step 2: Load & Inspect Data -------------------------------------------------
+# 1) Load & basic cleaning
 ###############################################################################
+traits_raw <- read.csv(data_file, stringsAsFactors = FALSE)
+traits_raw <- traits_raw %>% select(Species, Methylation, Regen_Ability)
+traits_raw$Species <- tolower(trimws(traits_raw$Species))
 
-# 1. Load the phylogenetic tree
-loginfo("Loading phylogenetic tree from: %s", tree_file) #SWITCH TO GRAFTED TREE HERE
-tree <- read.tree(tree_file) #SWITCH TO GRAFTED TREE HERE
-
-# 2. Load the trait data
-loginfo("Loading trait data from: %s", data_file)
-traits_original <- tryCatch(
-  read.csv(data_file, stringsAsFactors = FALSE),
-  error = function(e) {
-    stop("Error reading trait data: ", e$message)
-  }
-)
-loginfo("Trait data: %dx%d rows/columns", nrow(traits_original), ncol(traits_original))
-
-# 3. Validate required columns
-required_cols <- c("Species", "Methylation", "Regen_Ability")
-missing_cols <- setdiff(required_cols, colnames(traits_original))
-if (length(missing_cols) > 0) {
-  stop("Missing required columns: ", paste(missing_cols, collapse = ", "))
-}
-# 4. Keep only the required columns
-traits_pruned <- traits_original[, required_cols]
-
-# Optional: Check how many rows and columns you now have
-cat("Pruned data has", nrow(traits_pruned), "rows and", ncol(traits_pruned), "columns.\n")
-```
-
-## Step 3: Clean & Match Data with Tree
-
-```{r}
-###############################################################################
-# Step 3: Clean & Match Data with Tree -----------------------------------------
-###############################################################################
-
-clean_and_match_data <- function(tree, traits_original) {
-  loginfo("Standardizing species names to lowercase and trimming whitespace.")
-  # Standardize species names
+# helper: align tree and data
+align_tree_and_data <- function(tree, df) {
   tree$tip.label <- tolower(trimws(tree$tip.label))
-  traits_original$Species <- tolower(trimws(traits_original$Species))
-  
-  # Filter traits with complete cases
-  loginfo("Filtering trait data to include only complete cases.")
-  traits_filtered <- traits_original[complete.cases(
-    traits_original$Methylation,
-    traits_original$Regen_Ability
-  ), ]
-  
-  loginfo("Filtered trait data to complete cases.")
-  
-  # Identify matching species
-  matching_species <- intersect(tree$tip.label, traits_filtered$Species)
-  loginfo("Number of matching species between tree and trait data: %d", length(matching_species))
-  
-  if(length(matching_species) < 10){
-    logerror("Not enough matching species between tree and trait data after filtering.")
-    stop("Insufficient matching species.")
+  # handle duplicate species in trait table (average numeric, keep first non-numeric)
+  if (any(duplicated(df$Species))) {
+    message("Duplicates detected in data — averaging numeric traits per species.")
+    df <- aggregate(. ~ Species, data = df, FUN = function(z) if (is.numeric(z)) mean(z, na.rm = TRUE) else z[1])
   }
-  
-  # Prune tree and traits
-  tree_pruned <- drop.tip(tree, setdiff(tree$tip.label, matching_species))
-  traits_pruned <- traits_filtered[traits_filtered$Species %in% matching_species, ]
-  
-  # Reorder traits to match tree tip labels
-  traits_pruned <- traits_pruned[match(tree_pruned$tip.label, traits_pruned$Species), ]
-  
-  # Verify matching
-  if(!all(tree_pruned$tip.label == traits_pruned$Species)){
-    logerror("Mismatch between pruned tree tip labels and trait data species.")
-    stop("Mismatch after pruning.")
+  common <- intersect(tree$tip.label, df$Species)
+  if (length(common) < 3L) stop("Too few overlapping species (", length(common), ").")
+  tree2 <- drop.tip(tree, setdiff(tree$tip.label, common))
+  df2   <- df[df$Species %in% common, , drop = FALSE]
+  df2   <- df2[match(tree2$tip.label, df2$Species), , drop = FALSE]
+  stopifnot(identical(df2$Species, tree2$tip.label))
+  list(tree = tree2, data = df2)
+}
+
+# helper: safe PDF writer (Cairo if present, otherwise base pdf via ggsave)
+save_pdf <- function(gg, path, width_in, height_in) {
+  if (okCairo) {
+    Cairo::CairoPDF(filename = path, width = width_in, height = height_in)
+    print(gg); dev.off()
+  } else {
+    ggsave(path, plot = gg, width = width_in, height = height_in, units = "in", device = "pdf")
   }
-  
-  loginfo("Pruned tree and trait data to %d species.", length(matching_species))
-  
-  # Resolve polytomies if necessary
-  if(!is.binary(tree_pruned)) {
-    logwarn("Tree is not binary. Resolving polytomies using multi2di().")
-    tree_pruned <- ape::multi2di(tree_pruned)
-    loginfo("Tree is now binary: %s", is.binary(tree_pruned))
+  cat("Saved:", path, "\n")
+}
+
+###############################################################################
+# 2) Core analysis function for one tree
+###############################################################################
+run_pgls_analysis <- function(tree_in, df_in, tree_label, fig_suffix, out_dir) {
+  cat("=== Running:", tree_label, "===\n")
+  tree <- tree_in
+  df   <- df_in
+
+  # --- Tree prep ---
+  if (is.null(tree$edge.length)) stop("Tree has no branch lengths.")
+  tree$edge.length[tree$edge.length < 1e-6] <- 1e-4
+  tree <- phytools::force.ultrametric(tree, method = "nnls")
+
+  # --- Transform (Tukey) ---
+  lam_tuk <- rcompanion::transformTukey(df$Methylation, returnLambda = TRUE, plotit = FALSE)
+  df$Methylation_Tukey <- rcompanion::transformTukey(df$Methylation, returnLambda = FALSE, plotit = FALSE)
+
+  # --- 3-level regeneration factor ---
+  df$Regen_3L <- dplyr::recode(as.numeric(df$Regen_Ability),
+                               `1`="None", `2`="Partial", `3`="Partial", `4`="WBR",
+                               .default = NA_character_)
+  df$Regen_3L <- factor(df$Regen_3L, levels = c("None","Partial","WBR"))
+  df$Species <- tree$tip.label
+  rownames(df) <- df$Species
+  stopifnot(identical(df$Species, tree$tip.label))
+
+  # --- Models (PGLS) ---
+  corPag <- corPagel(0.5, phy = tree, form = ~Species, fixed = FALSE)
+  mod_full <- nlme::gls(Methylation_Tukey ~ Regen_3L,
+                        data = df, correlation = corPag, method = "ML")
+  mod_null <- nlme::gls(Methylation_Tukey ~ 1,
+                        data = df, correlation = corPag, method = "ML")
+
+  comp <- suppressWarnings(anova(mod_null, mod_full))
+
+  # --- Robust LR & p extraction (handles L.Ratio / LR value / Chisq etc.) ---
+  LR_cols <- grep("LR|L\\.R|Ratio|Chi", names(comp), ignore.case = TRUE)
+  P_cols  <- grep("^p|p[- ]?value|Pr",  names(comp), ignore.case = TRUE)
+
+  LR_value <- if (length(LR_cols) > 0) as.numeric(comp[2, LR_cols[1]]) else NA_real_
+  LR_pval  <- if (length(P_cols)  > 0) as.numeric(comp[2, P_cols[1]])  else NA_real_
+
+  if (is.na(LR_value) || is.na(LR_pval)) {
+    warning("Could not extract LR or p-value from anova(); printing comp for debugging.")
+    print(comp); print(names(comp))
   }
-  
-  loginfo("Data cleaning and matching completed.\n")
-  return(list(tree = tree_pruned, traits = traits_pruned))
-}
-matched_data    <- clean_and_match_data(tree, traits_original)
-tree_pruned     <- matched_data$tree
-traits_pruned   <- matched_data$traits
-```
 
-## Step 4: Adjust Branch Lengths & Ultrametricization
-
-```{r}
-###############################################################################
-# Step 4: Adjust Branch Lengths & Ultrametricization --------------------------
-###############################################################################
-
-# 1. Replace extremely small branch lengths
-small_branches <- which(tree_pruned$edge.length < 1e-6)
-loginfo("Number of branches with length <1e-6: %d", length(small_branches))
-if (length(small_branches) > 0) {
-  tree_pruned$edge.length[small_branches] <- 1e-4
-  loginfo("Replaced extremely small branch lengths with 1e-4.")
-}
-
-# 2. Replace zero-length branches
-zero_branches <- which(tree_pruned$edge.length == 0)
-if (length(zero_branches) > 0) {
-  tree_pruned$edge.length[zero_branches] <- 1e-4
-  loginfo("Replaced zero branch lengths with 1e-4.")
-}
-
-# 3. Force the tree to be ultrametric
-loginfo("Forcing ultrametric with phytools::force.ultrametric using 'nnls' method...")
-tree_ultrametric <- tryCatch({
-  phytools::force.ultrametric(tree_pruned, method = "nnls")
-}, error = function(e) {
-  logerror("force.ultrametric failed: %s", e$message)
-  stop("Ultrametricization failed.")
-})
-
-# 4. Verify the tree is now ultrametric
-loginfo("Is the tree ultrametric now?: %s", is.ultrametric(tree_ultrametric))
-loginfo("Ultrametricization completed.\n")
-
-
-```
-
-## Step 5: Phylogenetic Signal Testing in Raw Trait Data
-
-```{r}
-###############################################################################
-# Step 5: Phylogenetic Signal Testing in Raw Trait Data ------------------------
-###############################################################################
-
-# Extract raw data
-data_vector <- traits_pruned$Methylation
-names(data_vector) <- traits_pruned$Species  # Assign species names for phylogenetic tests
-
-# Summary statistics
-cat("\nSummary Statistics for Raw Data:\n")
-print(summary(data_vector))
-
-# Skewness and kurtosis
-raw_skewness <- skewness(data_vector, na.rm = TRUE)
-raw_kurtosis <- kurtosis(data_vector, na.rm = TRUE)
-cat("Skewness: ", round(raw_skewness, 4), " | Kurtosis: ", round(raw_kurtosis, 4), "\n")
-
-# Normality tests
-cat("\nNormality Tests for Raw Data:\n")
-shapiro_result <- tryCatch(shapiro.test(data_vector), error = function(e) NULL)
-ad_result <- tryCatch(ad.test(data_vector), error = function(e) NULL)
-lillie_result <- tryCatch(lillie.test(data_vector), error = function(e) NULL)
-
-if (!is.null(shapiro_result)) 
-  cat("Shapiro-Wilk: W =", round(shapiro_result$statistic, 4), "| P-value =", round(shapiro_result$p.value, 4), "\n")
-if (!is.null(ad_result)) 
-  cat("Anderson-Darling: A =", round(ad_result$statistic, 4), "| P-value =", round(ad_result$p.value, 4), "\n")
-if (!is.null(lillie_result)) 
-  cat("Lilliefors Test: D =", round(lillie_result$statistic, 4), "| P-value =", round(lillie_result$p.value, 4), "\n")
-
-# Test Phylogenetic Signal --------------------------------------------
-cat("\n=== Testing Phylogenetic Signal in Raw Data ===\n")
-
-# Blomberg's K
-K_result <- tryCatch({
-  phylosig(tree_pruned, data_vector, method = "K", test = TRUE, nsim = 1000)
-}, error = function(e) {
-  cat("Blomberg's K failed:", e$message, "\n")
-  NULL
-})
-
-if (!is.null(K_result)) {
-  cat("Blomberg's K: ", round(K_result$K, 4), " | P-value: ", round(K_result$P, 4), "\n")
-}
-
-# Pagel's Lambda
-lambda_result <- tryCatch({
-  phylosig(tree_pruned, data_vector, method = "lambda", test = TRUE)
-}, error = function(e) {
-  cat("Pagel's Lambda failed:", e$message, "\n")
-  NULL
-})
-
-if (!is.null(lambda_result)) {
-  cat("Pagel's Lambda: ", round(lambda_result$lambda, 4), " | P-value: ", round(lambda_result$P, 4), "\n")
-}
-
-```
-
-## Step 6: Data Transformations
-
-```{r}
-###############################################################################
-# Step 6: Data Transformations -------------------------------------
-###############################################################################
-
-# Ensure positivity for transformations that require it
-min_value <- min(traits_pruned$Methylation, na.rm = TRUE)
-shift_constant <- ifelse(min_value <= 0, abs(min_value) + 1e-6, 0)
-if (shift_constant > 0) {
-  warning(paste("Data shifted by", shift_constant, "to ensure positivity for transformations requiring positive data."))
-}
-
-# Shifted data for non-positive cases
-data_vector <- traits_pruned$Methylation
-data_vector_shifted <- data_vector + shift_constant
-
-# List of transformations
-transformations <- list(
-  Raw = data_vector,
-  Log1p = log1p(data_vector_shifted),
-  Sqrt = sqrt(data_vector_shifted),
-  Inverse = 1 / (data_vector_shifted + 1e-6),  # Avoid divide-by-zero issues
-  Log10 = log10(data_vector_shifted + 1),     # Log10 transformation
-  Arcsine_Sqrt = asin(sqrt(data_vector_shifted / max(data_vector_shifted, na.rm = TRUE))),  # Arcsine square root
-  Hyperbolic_Arcsine = asinh(data_vector),    # Hyperbolic arcsine transformation
-  Reciprocal_Sqrt = 1 / sqrt(data_vector_shifted + 1e-6),  # Reciprocal square root
-  Zscore = scale(data_vector),                # Z-score standardization
-  Tukey_Ladder = transformTukey(data_vector, returnLambda = FALSE, plotit = FALSE),  # Tukey's Ladder of Powers
-  BoxCox = tryCatch({
-    boxcox_lambda <- car::powerTransform(data_vector_shifted, family = "bcPower")$lambda
-    car::bcPower(data_vector_shifted, boxcox_lambda)
-  }, error = function(e) {
-    warning("Box-Cox transformation failed. Returning NA.")
-    NA
-  })
-)
-
-# Initialize dataframe for test results
-test_results <- data.frame(
-  Method = character(),
-  Shapiro_W = numeric(), Shapiro_P = numeric(),
-  AD_A = numeric(), AD_P = numeric(),
-  JB_Stat = numeric(), JB_P = numeric(),
-  Lillie_Stat = numeric(), Lillie_P = numeric(),
-  stringsAsFactors = FALSE
-)
-
-# Apply each transformation and run normality tests
-for (name in names(transformations)) {
-  transformed_data <- transformations[[name]]
-  
-  if (all(is.na(transformed_data))) {
-    warning(paste("Transformation", name, "failed. Skipping."))
-    next
-  }
-  
-  transformed_data <- transformed_data[!is.na(transformed_data)]  # Remove NAs
-  
-  # Initialize placeholders for test results
-  shapiro_w <- ad_a <- jb_stat <- lillie_stat <- NA
-  shapiro_p <- ad_p <- jb_p <- lillie_p <- NA
-  
-  # Shapiro-Wilk Test
-  shapiro_result <- tryCatch({
-    shapiro.test(transformed_data)
-  }, error = function(e) NULL)
-  if (!is.null(shapiro_result)) {
-    shapiro_w <- shapiro_result$statistic
-    shapiro_p <- shapiro_result$p.value
-  }
-  
-  # Anderson-Darling Test
-  ad_result <- tryCatch({
-    ad.test(transformed_data)
-  }, error = function(e) NULL)
-  if (!is.null(ad_result)) {
-    ad_a <- ad_result$statistic
-    ad_p <- ad_result$p.value
-  }
-  
-  # Jarque-Bera Test
-  jb_result <- tryCatch({
-    jarque.bera.test(transformed_data)
-  }, error = function(e) NULL)
-  if (!is.null(jb_result)) {
-    jb_stat <- jb_result$statistic
-    jb_p <- jb_result$p.value
-  }
-  
-  # Lilliefors Test
-  lillie_result <- tryCatch({
-    lillie.test(transformed_data)
-  }, error = function(e) NULL)
-  if (!is.null(lillie_result)) {
-    lillie_stat <- lillie_result$statistic
-    lillie_p <- lillie_result$p.value
-  }
-  
-  # Append results to the dataframe
-  test_results <- rbind(test_results, data.frame(
-    Method = name,
-    Shapiro_W = round(shapiro_w, 4), Shapiro_P = round(shapiro_p, 4),
-    AD_A = round(ad_a, 4), AD_P = round(ad_p, 4),
-    JB_Stat = round(jb_stat, 4), JB_P = round(jb_p, 4),
-    Lillie_Stat = round(lillie_stat, 4), Lillie_P = round(lillie_p, 4)
-  ))
-}
-
-# Print results
-cat("\nNormality Test Results:\n")
-print(test_results, row.names = FALSE)
-
-```
-
-## Step 7: Phylogenetic Signal Testing in Tukey-Transformed Trait Data
-
-```{r}
-###############################################################################
-# Step 7: Phylogenetic Signal Testing in Tukey-Transformed Trait Data ---------
-###############################################################################
-
-# Load required library for Tukey's Ladder of Powers
-library(rcompanion)  # For transformTukey function
-
-# Transform the data and retrieve lambda
-data_vector <- traits_pruned$Methylation
-tukey_result <- tryCatch({
-  # Perform Tukey transformation and get the lambda
-  lambda <- transformTukey(data_vector, returnLambda = TRUE, plotit = FALSE)
-  cat("Tukey's Ladder of Powers - Lambda:", round(lambda, 4), "\n")
-  
-  # Apply the Tukey transformation
-  transformTukey(data_vector, returnLambda = FALSE, plotit = FALSE)
-}, error = function(e) {
-  stop("Tukey transformation failed: ", e$message)
-})
-
-# Assign transformed data and species names
-data_vector_tukey <- tukey_result
-names(data_vector_tukey) <- traits_pruned$Species
-
-# Summary Statistics ----------------------------------------------------------
-cat("\nSummary Statistics for Tukey-Transformed Data:\n")
-print(summary(data_vector_tukey))
-
-# Skewness and kurtosis
-tukey_skewness <- skewness(data_vector_tukey, na.rm = TRUE)
-tukey_kurtosis <- kurtosis(data_vector_tukey, na.rm = TRUE)
-cat("Skewness: ", round(tukey_skewness, 4), " | Kurtosis: ", round(tukey_kurtosis, 4), "\n")
-
-# Normality Tests -------------------------------------------------------------
-cat("\nNormality Tests for Tukey-Transformed Data:\n")
-shapiro_result <- tryCatch(shapiro.test(data_vector_tukey), error = function(e) NULL)
-ad_result <- tryCatch(ad.test(data_vector_tukey), error = function(e) NULL)
-lillie_result <- tryCatch(lillie.test(data_vector_tukey), error = function(e) NULL)
-
-if (!is.null(shapiro_result)) 
-  cat("Shapiro-Wilk: W =", round(shapiro_result$statistic, 4), "| P-value =", round(shapiro_result$p.value, 4), "\n")
-if (!is.null(ad_result)) 
-  cat("Anderson-Darling: A =", round(ad_result$statistic, 4), "| P-value =", round(ad_result$p.value, 4), "\n")
-if (!is.null(lillie_result)) 
-  cat("Lilliefors Test: D =", round(lillie_result$statistic, 4), "| P-value =", round(lillie_result$p.value, 4), "\n")
-
-# Test Phylogenetic Signal ----------------------------------------------------
-cat("\n=== Testing Phylogenetic Signal in Tukey-Transformed Data ===\n")
-
-# Blomberg's K
-K_result <- tryCatch({
-  phylosig(tree_pruned, data_vector_tukey, method = "K", test = TRUE, nsim = 1000)
-}, error = function(e) {
-  cat("Blomberg's K failed:", e$message, "\n")
-  NULL
-})
-
-if (!is.null(K_result)) {
-  cat("Blomberg's K: ", round(K_result$K, 4), " | P-value: ", round(K_result$P, 4), "\n")
-}
-
-# Pagel's Lambda
-lambda_result <- tryCatch({
-  phylosig(tree_pruned, data_vector_tukey, method = "lambda", test = TRUE)
-}, error = function(e) {
-  cat("Pagel's Lambda failed:", e$message, "\n")
-  NULL
-})
-
-if (!is.null(lambda_result)) {
-  cat("Pagel's Lambda: ", round(lambda_result$lambda, 4), " | P-value: ", round(lambda_result$P, 4), "\n")
-}
-
-
-```
-
-## Step 8: Prepare Comparative Data Using Best Model
-
-```{r}
-###############################################################################
-# Step 8: Prepare Comparative Data Using Best Model ----------------------------
-###############################################################################
-
-
-# Apply Tukey's Ladder of Powers transformation directly to traits_pruned
-loginfo("Applying Tukey's Ladder of Powers transformation to Methylation.")
-traits_pruned$Methylation_Tukey <- rcompanion::transformTukey(
-  traits_pruned$Methylation, returnLambda = FALSE, plotit = FALSE
-)
-loginfo("Tukey's Ladder of Powers transformation applied successfully.")
-
-
-# Create the comparative data object
-loginfo("Creating comparative data object...")
-comparative_data <- tryCatch({
-  comparative.data(
-    phy          = tree_ultrametric,
-    data         = traits_pruned,
-    names.col    = "Species",
-    vcv          = TRUE,
-    na.omit      = FALSE,
-    warn.dropped = TRUE
-  )
-}, error = function(e) {
-  logerror("Failed to create comparative data object: %s", e$message)
-  stop("Comparative data preparation failed.")
-})
-
-loginfo("Comparative data prepared with %d species.\n", nrow(comparative_data$data))
-
-
-```
-
-## Step 9: Fit Multiple PGLS Models
-
-```{r}
-###############################################################################
-# Step 9a: Fit Multiple PGLS Models ---------------------------------------------
-###############################################################################
-
-loginfo("=== Fitting Multiple PGLS Models ===\n")
-
-# Define response variable (Tukey's transformed Methylation)
-response_var <- "Methylation_Tukey"
-loginfo("Using Tukey-transformed Methylation as response variable.")
-
-# List of all models to fit
-model_types <- c("BM", "OUrandomRoot", "OUfixedRoot", "lambda", 
-                 "kappa", "delta", "EB")
-
-# Define formulas for single and multi-predictor models
-model_formulas <- list(
-  Regen = as.formula(paste(response_var, "~ Regen_Ability")),
-    # Quadratic terms (nonlinear) for Regen
-  RegenQuad = as.formula(paste(response_var, "~ Regen_Ability + I(Regen_Ability^2)")),
-  Null = as.formula(paste(response_var, "~ 1"))
-)
-
-# Initialize list to store fitted models
-fitted_models <- list()
-
-# Loop over model types and predictor formulas
-for (model_type in model_types) {
-  for (formula_name in names(model_formulas)) {
-    formula <- model_formulas[[formula_name]]
-    model_name <- paste(model_type, formula_name, sep = "_")
-    
-    loginfo("Fitting model: %s (%s)", model_name, model_type)
-    
-    # Fit the model using phylolm with error handling
-    fitted_model <- tryCatch({
-      phylolm(
-        formula = formula,
-        data = comparative_data$data,
-        phy = comparative_data$phy,
-        model = model_type,
-        lower.bound = list(delta = 0.01),
-        upper.bound = list(delta = 5),
-        boot = 100
-      )
-    }, error = function(e) {
-      logerror("Model %s fitting failed: %s", model_name, e$message)
-      return(NULL)
-    })
-    
-    # Store the fitted model if successful
-    if (!is.null(fitted_model)) {
-      fitted_models[[model_name]] <- fitted_model
-      loginfo("Model %s fitted successfully.", model_name)
-    } else {
-      logwarn("Model %s could not be fitted.", model_name)
-    }
-  }
-}
-
-loginfo("=== End of PGLS Model Fitting ===\n")
-
-# Compare fitted models
-model_comparison <- compare_models(fitted_models)
-
-# Identify the best model based on AIC
-best_model_name <- model_comparison$Model[which.min(model_comparison$AIC)]
-loginfo("Best model for analysis: %s", best_model_name)
-
-```
-
-```{r}
-###############################################################################
-# Step 9b: Likelihood Ratio Test ---------------------------------------------
-###############################################################################
-
-# Manual Likelihood Ratio Test to compare Regen vs. Null models
-lrt_results <- list()
-for (model_type in model_types) {
-  null_model <- fitted_models[[paste(model_type, "Null", sep = "_")]]
-  regen_model <- fitted_models[[paste(model_type, "Regen", sep = "_")]]
-  
-  if (!is.null(null_model) && !is.null(regen_model)) {
-    # Calculate the likelihood ratio statistic:
-    lr_stat <- 2 * (as.numeric(logLik(regen_model)) - as.numeric(logLik(null_model)))
-    # The degrees of freedom difference (usually 1 if only one predictor is added)
-    df <- length(coef(regen_model)) - length(coef(null_model))
-    # Calculate the p-value from the chi-square distribution
-    p_val <- pchisq(lr_stat, df = df, lower.tail = FALSE)
-    
-    lrt_results[[model_type]] <- data.frame(
-      LR_statistic = lr_stat,
-      df = df,
-      p_value = p_val
-    )
-  }
-}
-
-# Print LRT results
-lrt_results
-
-# Combine all LRT results into one data frame
-lrt_combined <- do.call(rbind, lapply(names(lrt_results), function(mt) {
-  df <- lrt_results[[mt]]
-  df$model_type <- mt  # add a column for the model type
-  df
-}))
-rownames(lrt_combined) <- NULL
-
-# Print the combined LRT results
-lrt_combined
-```
-
-```{r}
-###############################################################################
-# Step 9c: Prepare Figure------------------------------------------------------
-###############################################################################
-library(ggplot2)
-
-# Label categories
-comparative_data$data$Regen_Label <- factor(comparative_data$data$Regen_Ability,
-                                            levels = c(1, 2, 3, 4),
-                                            labels = c("None / Very Limited", 
-                                                       "Appendage-Only", 
-                                                       "Unidirectional", 
-                                                       "Bidirectional"))
-
-# Correlation
-cor_val <- cor(comparative_data$data$Regen_Ability, 
-               comparative_data$data$Methylation_Tukey, 
-               use = "complete.obs")
-cor_label <- paste0("r = ", round(cor_val, 2))
-
-# Plot
-p <- ggplot(comparative_data$data, aes(x = Regen_Label, y = Methylation_Tukey)) +
-  # Scatter points
-  geom_point(shape = 21, size = 3.5, stroke = 0.5, color = "black", fill = "grey60") +
-  
-  # Regression line using numeric values
-  geom_smooth(
-    data = comparative_data$data,
-    mapping = aes(x = Regen_Ability, y = Methylation_Tukey),
-    method = "lm", se = TRUE, color = "black", size = 1,
-    inherit.aes = FALSE, linetype = "solid"
-  ) +
-  
-  # Add correlation label
-  annotate("text", x = 3.6,  # Move left (try 3.6 or 3.5 instead of 4)
-         y = max(comparative_data$data$Methylation_Tukey, na.rm = TRUE) * 0.98,
-         label = cor_label,
-         size = 5, hjust = 1, fontface = "italic") +
-  
-  # Labels and theme
-  labs(
-    title = "Relationship Between Regeneration Ability\nand DNA Methylation",
-    x = "Regeneration Category",
-    y = "Tukey-Transformed Methylation"
-  ) +
-  theme_classic(base_size = 14) +
-  theme(
-    plot.title = element_text(face = "bold", size = 16, hjust = 0.5),
-    axis.title.x = element_text(face = "bold", size = 14, margin = margin(t = 10)),
-    axis.title.y = element_text(face = "bold", size = 14, margin = margin(r = 10)),
-    axis.text = element_text(size = 12),
-    axis.ticks.length = unit(0.2, "cm")
+  # --- ΔAIC (safe & explicit) ---
+  aic_null <- as.numeric(AIC(mod_null))
+  aic_full <- as.numeric(AIC(mod_full))
+  delta_aic <- aic_full - aic_null
+
+  # --- Fitted λ ---
+  lambda_est <- tryCatch(
+    as.numeric(coef(mod_full$modelStruct$corStruct, unconstrained = FALSE)[1]),
+    error = function(e) NA_real_
   )
 
-# Save
-ggsave("Regeneration_Methylation_Plot.pdf", p, width = 7.5, height = 6, dpi = 600)
+  # --- emmeans & pairwise ---
+  emm_obj  <- emmeans::emmeans(mod_full, ~Regen_3L, data = df)
+  emm_df   <- as.data.frame(emm_obj)            # emmean, SE, df, lower.CL, upper.CL
+  emm_ci   <- as.data.frame(confint(emm_obj))   # ensures lower.CL/upper.CL present
+  contr_df <- as.data.frame(pairs(emm_obj, adjust = "none"))
 
-# Show
-print(p)
-```
+  # --- Residual diagnostics ---
+  res <- residuals(mod_full, type = "normalized")
+  sh  <- shapiro.test(res)
+  ad  <- nortest::ad.test(res)
+  lev <- car::leveneTest(res ~ df$Regen_3L)
+  res_lambda <- phytools::phylosig(tree, setNames(res, df$Species), method = "lambda", test = TRUE)
 
-```{r}
-###############################################################################
-# Step 9d: Model Slope---------------------------------------------------------
-###############################################################################
-library(phylolm)
+  # --- Normality table (raw vs Tukey) ---
+  diag_fun <- function(x) data.frame(
+    Shapiro_W = unname(shapiro.test(x)$statistic),
+    Shapiro_p = shapiro.test(x)$p.value,
+    AD_A      = nortest::ad.test(x)$statistic,
+    AD_p      = nortest::ad.test(x)$p.value,
+    Lillie_D  = nortest::lillie.test(x)$statistic,
+    Lillie_p  = nortest::lillie.test(x)$p.value,
+    Skewness  = moments::skewness(x, na.rm = TRUE),
+    Kurtosis  = moments::kurtosis(x, na.rm = TRUE)
+  )
+  x_raw <- df$Methylation
+  x_tuk <- df$Methylation_Tukey
+  norm_tbl <- rbind(
+    cbind(Transform = "Raw",   diag_fun(x_raw)),
+    cbind(Transform = "Tukey", diag_fun(x_tuk))
+  )
+  norm_tbl$Tukey_lambda <- c(NA, lam_tuk)
 
-# Example of fitting a PGLS model via phylolm:
-pgls_model <- phylolm(Methylation_Tukey ~ Regen_Ability, 
-                      data = comparative_data$data, 
-                      phy = comparative_data$phy, 
-                      model = "lambda")
+  # --- Phylogenetic signal (raw & Tukey) ---
+  names(x_raw) <- names(x_tuk) <- df$Species
+  K_raw <- phytools::phylosig(tree, x_raw, method = "K", test = TRUE, nsim = 1000)
+  L_raw <- phytools::phylosig(tree, x_raw, method = "lambda", test = TRUE)
+  K_tuk <- phytools::phylosig(tree, x_tuk, method = "K", test = TRUE, nsim = 1000)
+  L_tuk <- phytools::phylosig(tree, x_tuk, method = "lambda", test = TRUE)
+  phy_tbl <- data.frame(
+    Transform = c("Raw","Raw","Tukey","Tukey"),
+    Metric    = c("Blomberg_K","Pagel_lambda","Blomberg_K","Pagel_lambda"),
+    Estimate  = c(K_raw$K, L_raw$lambda, K_tuk$K, L_tuk$lambda),
+    P_value   = c(K_raw$P, L_raw$P, K_tuk$P, L_tuk$P)
+  )
 
-# View summary to see slope
-summary(pgls_model)$coefficients
+  # --- SI summary row (clean, no NA where possible) ---
+  si_summary <- data.frame(
+    Tree             = tree_label,
+    Nspecies         = nrow(df),
+    Tukey_lambda     = round(lam_tuk, 3),
+    Delta_AIC        = round(delta_aic, 3),
+    LR               = ifelse(is.finite(LR_value), round(LR_value, 3), NA),
+    p_value          = ifelse(is.finite(LR_pval),  signif(LR_pval, 3), NA),
+    Lambda_est       = round(lambda_est, 3),
+    Residual_lambda  = round(res_lambda$lambda, 3),
+    Residual_lambda_p= signif(res_lambda$P, 3),
+    Shapiro_p        = signif(sh$p.value, 3),
+    AD_p             = signif(ad$p.value, 3),
+    Levene_p         = signif(lev$`Pr(>F)`[1], 3),
+    check.names = FALSE
+  )
 
+  # --- Figure (EMMs ± SE with raw points; same look as yours) ---
+  label_map <- c("None" = "None / limited", "Partial" = "Tissue / organ", "WBR" = "Whole-body")
+  emm_ci$Regen_3L_labelled <- factor(label_map[emm_ci$Regen_3L],
+                                     levels = c("None / limited","Tissue / organ","Whole-body"))
+  df$Regen_3L_labelled <- factor(label_map[df$Regen_3L],
+                                 levels = c("None / limited","Tissue / organ","Whole-body"))
 
-```
+  p <- ggplot() +
+    geom_jitter(data = df,
+                aes(Regen_3L_labelled, Methylation_Tukey),
+                width = 0.18, alpha = 0.35, size = 1.5, color = "gray35") +
+    geom_errorbar(data = emm_ci,
+                  aes(Regen_3L_labelled, ymin = lower.CL, ymax = upper.CL),
+                  width = 0.10, linewidth = 0.8, color = "black") +
+    geom_point(data = emm_ci,
+               aes(Regen_3L_labelled, emmean),
+               size = 3.3, color = "black") +
+    coord_cartesian(ylim = c(0, 5.0), clip = "off") +
+    scale_x_discrete(
+      limits = c("None / limited","Tissue / organ","Whole-body"),
+      labels = c("None /\nlimited","Tissue /\norgan","Whole-body"),
+      expand = expansion(mult = c(0.12, 0.12))
+    ) +
+    labs(x = "Regeneration capacity",
+         y = "CpG methylation (Tukey-transformed)",
+         title = paste0("PGLS estimated marginal means ± SE — ", tree_label)) +
+    theme_classic(base_size = 11, base_family = "Helvetica") +
+    theme(plot.title   = element_text(hjust = 0.5, size = 12.5, margin = margin(b = 8)),
+          axis.title.x = element_text(size = 12, face = "bold", margin = margin(t = 12)),
+          axis.title.y = element_text(size = 12, face = "bold", margin = margin(r = 12)),
+          axis.text.x  = element_text(size = 10.5, color = "black", lineheight = 1.1, vjust = 1),
+          axis.text.y  = element_text(size = 10.5, color = "black"),
+          axis.line    = element_line(linewidth = 0.5),
+          axis.ticks   = element_line(linewidth = 0.4),
+          plot.margin  = margin(10, 10, 10, 10))
 
-## Step 10: Residual Diagnostics and Phylogenetic Signal
-
-```{r}
-###############################################################################
-# 10.1. Function: Examine Residuals (Numeric + Plots)
-###############################################################################
-examine_residuals <- function(model, model_name) {
-  cat(sprintf("\n### Residual Diagnostics for %s ###\n", model_name))
-  
-  # Attempt to extract residuals
-  res <- tryCatch({
-    residuals(model)
-  }, error = function(e) {
-    cat(sprintf("Error extracting residuals for %s: %s\n", model_name, e$message))
-    return(NULL)
-  })
-  if (is.null(res)) return(NULL)
-  
-  # Attempt to extract fitted values
-  fitted_vals <- tryCatch({
-    model$fitted.values
-  }, error = function(e) {
-    cat(sprintf("Error extracting fitted values for %s: %s\n", model_name, e$message))
-    return(NULL)
-  })
-  
-  # --- Numeric Diagnostics ---
-  cat("Residual Summary:\n")
-  print(summary(res))
-  
-  # Skewness and Kurtosis
-  cat(sprintf("Skewness: %.4f | Kurtosis: %.4f\n",
-              moments::skewness(res, na.rm = TRUE),
-              moments::kurtosis(res, na.rm = TRUE)))
-  
-  # Normality Tests
-  cat("\nNormality Tests:\n")
-  # Shapiro-Wilk
-  if (!is.null(tryCatch(shapiro.test(res), error = function(e) NULL))) {
-    sh <- shapiro.test(res)
-    cat(sprintf("  Shapiro-Wilk: W = %.4f | P-value = %.4f\n", sh$statistic, sh$p.value))
-  }
-  # Anderson-Darling
-  if (requireNamespace("nortest", quietly = TRUE)) {
-    ad <- tryCatch(nortest::ad.test(res), error = function(e) NULL)
-    if (!is.null(ad)) {
-      cat(sprintf("  Anderson-Darling: A = %.4f | P-value = %.4f\n", ad$statistic, ad$p.value))
-    }
-  }
-  # Lilliefors
-  if (requireNamespace("nortest", quietly = TRUE)) {
-    lillie <- tryCatch(nortest::lillie.test(res), error = function(e) NULL)
-    if (!is.null(lillie)) {
-      cat(sprintf("  Lilliefors: D = %.4f | P-value = %.4f\n", lillie$statistic, lillie$p.value))
-    }
-  }
-  
-  # Outlier Detection (|z| > 3)
-  z_scores <- scale(res)
-  outliers <- which(abs(z_scores) > 3)
-  if (length(outliers) > 0) {
-    cat(sprintf("\nDetected %d outliers (|z| > 3):\n", length(outliers)))
-    print(names(res)[outliers])
+  fig_path <- file.path(out_dir, paste0("PGLS_EMM_", fig_suffix, ".pdf"))
+  if (requireNamespace("Cairo", quietly = TRUE)) {
+    Cairo::CairoPDF(fig_path, width = 95/25.4, height = 85/25.4)
+    print(p); dev.off()
   } else {
-    cat("No significant outliers detected (|z| > 3).\n")
+    ggsave(fig_path, plot = p, width = 95/25.4, height = 85/25.4, units = "in", device = "pdf")
   }
-  
-  # --- Visual Diagnostics ---
-  # 1) Residuals vs. Fitted Values
-  plot(fitted_vals, res,
-       xlab = "Fitted Values",
-       ylab = "Residuals",
-       main = paste("Residuals vs Fitted:", model_name))
-  abline(h = 0, col = "red", lty = 2)
-  
-  # 2) Normal Q-Q Plot
-  qqnorm(res, main = paste("Normal Q-Q Plot:", model_name))
-  qqline(res, col = "red", lty = 2)
-  
-  return(res)
+  cat("Saved:", fig_path, "\n")
+
+  # --- Write per-tree outputs ---
+  write.csv(emm_df,    file.path(out_dir, paste0("EMMs_", fig_suffix, ".csv")),            row.names = FALSE)
+  write.csv(contr_df,  file.path(out_dir, paste0("PosthocContrasts_", fig_suffix, ".csv")),row.names = FALSE)
+  write.csv(norm_tbl,  file.path(out_dir, paste0("Normality_", fig_suffix, ".csv")),       row.names = FALSE)
+  write.csv(phy_tbl,   file.path(out_dir, paste0("PhyloSignal_", fig_suffix, ".csv")),     row.names = FALSE)
+  write.csv(df,        file.path(out_dir, paste0("MatchedTraits_", fig_suffix, ".csv")),   row.names = FALSE)
+  ape::write.tree(tree, file.path(out_dir, paste0("AnalysisTree_", fig_suffix, ".newick")))
+
+  list(SummaryRow = si_summary, ModFull = mod_full, Tree = tree, Data = df)
 }
 
 ###############################################################################
-# 10.2. Function: Check Phylogenetic Signal (General)
+# 3) Run for both trees
 ###############################################################################
-check_phylo_signal <- function(tree, residuals, label) {
-  cat(sprintf("\n=== Phylogenetic Signal for %s (Original Tree) ===\n", label))
-  
-  # Align residuals with tree tips
-  common_species <- intersect(names(residuals), tree$tip.label)
-  aligned_residuals <- residuals[common_species]
-  tree_aligned <- ape::drop.tip(tree, setdiff(tree$tip.label, common_species))
-  
-  if (length(common_species) < 5) {
-    cat("Insufficient data for phylogenetic signal testing (fewer than 5 species). Skipping...\n")
-    return(NULL)
-  }
-  
-  # Blomberg's K
-  K_result <- tryCatch(phytools::phylosig(tree_aligned, aligned_residuals, method = "K", test = TRUE),
-                       error = function(e) NULL)
-  if (!is.null(K_result)) {
-    cat(sprintf("  Blomberg's K: %.4f | P-value: %.4f\n", K_result$K, K_result$P))
-  }
-  
-  # Pagel's Lambda
-  lambda_result <- tryCatch(phytools::phylosig(tree_aligned, aligned_residuals, method = "lambda", test = TRUE),
-                            error = function(e) NULL)
-  if (!is.null(lambda_result)) {
-    cat(sprintf("  Pagel's Lambda: %.4f | P-value: %.4f\n", lambda_result$lambda, lambda_result$P))
-  }
-}
+tree_cal <- read.tree(tree_calibrated_file)
+tree_gra <- read.tree(tree_grafted_file)
+
+cal <- align_tree_and_data(tree_cal, traits_raw)
+gra <- align_tree_and_data(tree_gra, traits_raw)
+
+res_cal <- run_pgls_analysis(cal$tree, cal$data, "Calibrated (119-tip)", "calibrated", out_dir)
+res_gra <- run_pgls_analysis(gra$tree, gra$data, "Grafted (175-tip)",    "grafted",   out_dir)
 
 ###############################################################################
-# 10.3. Function: Check Phylogenetic Signal (Lambda-Adjusted Tree)
+# 4) Cross-tree summary table (+ write)
 ###############################################################################
-check_phylo_signal_lambda <- function(tree, model, residuals, label) {
-  cat(sprintf("\n=== Phylogenetic Signal for %s (Lambda-Adjusted Tree) ===\n", label))
-  
-  # Align residuals with tree tips
-  common_species <- intersect(names(residuals), tree$tip.label)
-  aligned_residuals <- residuals[common_species]
-  tree_aligned <- ape::drop.tip(tree, setdiff(tree$tip.label, common_species))
-  
-  if (length(common_species) < 5) {
-    cat("Insufficient data for phylogenetic signal testing (fewer than 5 species). Skipping...\n")
-    return(NULL)
-  }
-  
-  # Retrieve lambda value from model$optpar
-  lambda_value <- tryCatch({
-    if (!is.null(model$optpar)) {
-      model$optpar  # Typically, this is a numeric value (or vector) storing lambda
-    } else {
-      stop("Lambda value not found in model.")
-    }
-  }, error = function(e) {
-    cat("Failed to retrieve lambda from model:", e$message, "\n")
-    return(NULL)
-  })
-  
-  if (is.null(lambda_value)) {
-    cat("Lambda value not available. Skipping Lambda-adjusted tree.\n")
-    return(NULL)
-  }
-  
-  cat(sprintf("Using Lambda value from model: %.4f\n", lambda_value))
-  
-  # Rescale the tree using the extracted lambda (using phytools::rescale)
-  tree_lambda <- tryCatch({
-    phytools::rescale(tree_aligned, model = "lambda", lambda = lambda_value)
-  }, error = function(e) {
-    cat("Failed to rescale tree with Lambda: ", e$message, "\n")
-    return(NULL)
-  })
-  
-  if (is.null(tree_lambda)) {
-    cat("Could not rescale tree. Skipping.\n")
-    return(NULL)
-  }
-  
-  # Test Phylogenetic Signal on the lambda-adjusted tree
-  K_result <- tryCatch(phytools::phylosig(tree_lambda, aligned_residuals, method = "K", test = TRUE),
-                       error = function(e) NULL)
-  if (!is.null(K_result)) {
-    cat(sprintf("  Blomberg's K (Lambda-adjusted): %.4f | P-value: %.4f\n", K_result$K, K_result$P))
-  }
-  
-  lambda_result <- tryCatch(phytools::phylosig(tree_lambda, aligned_residuals, method = "lambda", test = TRUE),
-                            error = function(e) NULL)
-  if (!is.null(lambda_result)) {
-    cat(sprintf("  Pagel's Lambda (Lambda-adjusted): %.4f | P-value: %.4f\n", lambda_result$lambda, lambda_result$P))
-  }
-}
+si_summary_both <- rbind(res_cal$SummaryRow, res_gra$SummaryRow)
+write.csv(si_summary_both, file.path(out_dir, "PGLS_summary_both_trees.csv"), row.names = FALSE)
+cat("\nWrote:", file.path(out_dir, "PGLS_summary_both_trees.csv"), "\n")
 
 ###############################################################################
-# 10.4. Run Diagnostics for Selected Models
+# 5) Session info (reproducibility)
 ###############################################################################
-# Example: define a set of model names you want to inspect
-model_names <- c("lambda_Regen", "lambda_RegenQuad")
+writeLines(capture.output(sessionInfo()), file.path(out_dir, "sessionInfo.txt"))
+cat("Wrote:", file.path(out_dir, "sessionInfo.txt"), "\n")
 
-# Loop through each model name, run diagnostics if present
-for (m in model_names) {
-  if (!is.null(fitted_models[[m]])) {
-    cat(sprintf("\n\n================= %s =================\n", m))
-    
-    # 4a. Residual Diagnostics
-    res <- examine_residuals(fitted_models[[m]], m)
-    
-    # 4b. Phylogenetic Signal in Residuals
-    if (!is.null(res)) {
-      # If this is a "lambda" model, do the lambda-adjusted check
-      if (grepl("^lambda_", m, ignore.case = TRUE)) {
-        check_phylo_signal_lambda(tree_pruned, fitted_models[[m]], res, m)
-      } else {
-        # Otherwise, do the standard check
-        check_phylo_signal(tree_pruned, res, m)
-      }
-    }
-  } else {
-    cat(sprintf("\nNo fitted model found for %s\n", m))
-  }
-}
-```
-
-## Step 11: Jackknife Leave-One-Out Sensitivity Analysis
-
-```{r}
-###############################################################################
-# Step 11: Jackknife Leave-One-Out Sensitivity Analysis for the lambda Model
-###############################################################################
-
-# 1. Identify Inputs
-tree_for_jackknife <- tree_ultrametric
-lambda_model       <- fitted_models$lambda_RegenQuad          # Change model if needed
-model_formula      <- formula(lambda_model)
-all_data           <- comparative_data$data
-
-# (New) Make sure there's a 'Species' column if it doesn't already exist
-if (!"Species" %in% colnames(all_data)) {
-  all_data$Species <- rownames(all_data)
-  # Optionally ensure lowercase here, if not done globally:
-  all_data$Species <- tolower(trimws(all_data$Species))
-}
-
-# Also match the tree tip labels:
-tree_for_jackknife$tip.label <- tolower(trimws(tree_for_jackknife$tip.label))
-
-# Identify which species are in both the tree and the data
-common_species <- intersect(tree_for_jackknife$tip.label, all_data$Species)
-
-# Initialize a results table
-jackknife_results <- data.frame(
-  Species_Dropped = character(),
-  AIC             = numeric(),
-  LogLik          = numeric(),
-  stringsAsFactors = FALSE
-)
-
-cat("\n--- Jackknife Leave-One-Out Analysis ---\n\n")
-
-# 3. Loop Through Each Species and Drop It
-for (species in common_species) {
-  cat(sprintf("Dropping species: %s ... ", species))
-  
-  # Prune the tree
-  pruned_tree <- tryCatch({
-    ape::drop.tip(tree_for_jackknife, species)
-  }, error = function(e) {
-    warning(sprintf("Tree pruning failed for '%s': %s", species, e$message))
-    return(NULL)
-  })
-  
-  # Skip if pruning fails or yields too few tips
-  if (is.null(pruned_tree) || length(pruned_tree$tip.label) < 3) {
-    cat("Pruning failed or fewer than 3 tips remain. Skipping.\n")
-    next
-  }
-  
-  # Prune the data by excluding the current species
-  pruned_data <- all_data[all_data$Species != species, ]
-  
-  # Double-check matching species between pruned tree & pruned data
-  matching_species <- intersect(pruned_tree$tip.label, pruned_data$Species)
-  if (length(matching_species) < 3) {
-    cat("Fewer than 3 matching species remain after pruning. Skipping.\n")
-    next
-  }
-  
-  # Subset pruned_data to only the matching species
-  pruned_data <- pruned_data[pruned_data$Species %in% matching_species, ]
-  
-  # 4. Fit the Same 'lambda' Model to the Pruned Tree & Data
-  model_fit <- tryCatch({
-    phylolm::phylolm(
-      formula = model_formula,
-      data    = pruned_data,
-      phy     = pruned_tree,
-      model   = "lambda"
-      # If your original final model had other arguments (bounds, boot, etc.), add them here:
-      # lower.bound = list(lambda = 0.0001),
-      # upper.bound = list(lambda = 2),
-      # boot = 100
-    )
-  }, error = function(e) {
-    warning(sprintf("Model fitting failed after dropping '%s': %s", species, e$message))
-    return(NULL)
-  })
-  
-  # If successful, record results
-  if (!is.null(model_fit)) {
-    result <- data.frame(
-      Species_Dropped = species,
-      AIC             = AIC(model_fit),
-      LogLik          = as.numeric(logLik(model_fit))
-    )
-    jackknife_results <- rbind(jackknife_results, result)
-    cat(sprintf("Done. AIC = %.2f | LogLik = %.2f\n", result$AIC, result$LogLik))
-  } else {
-    cat("Model fitting failed. Skipping.\n")
-  }
-}
-
-# 5. Display and Save the Jackknife Results
-if (nrow(jackknife_results) > 0) {
-  cat("\n=== Jackknife Results Summary ===\n")
-  print(jackknife_results)
-  write.csv(jackknife_results, "jackknife_results_lambda_Multi.csv", row.names = FALSE)
-  cat("Results saved to 'jackknife_results_lambda_Multi.csv'.\n")
-} else {
-  cat("\nNo valid Jackknife results were calculated.\n")
-}
-
-# 6. Interpretation of Jackknife Results
-if (nrow(jackknife_results) > 0) {
-  cat("\n=== Interpretation of Jackknife Results ===\n")
-  
-  # Summary stats
-  aic_mean <- mean(jackknife_results$AIC)
-  aic_range <- range(jackknife_results$AIC)
-  loglik_mean <- mean(jackknife_results$LogLik)
-  loglik_range <- range(jackknife_results$LogLik)
-  
-  cat(sprintf("Mean AIC across jackknife samples: %.2f\n", aic_mean))
-  cat(sprintf("AIC range: %.2f to %.2f\n", aic_range[1], aic_range[2]))
-  cat(sprintf("Mean Log-Likelihood across jackknife samples: %.2f\n", loglik_mean))
-  cat(sprintf("Log-Likelihood range: %.2f to %.2f\n", loglik_range[1], loglik_range[2]))
-  
-  # Calculate AIC deviation
-  jackknife_results$AIC_Deviation <- abs(jackknife_results$AIC - aic_mean)
-  jackknife_results_sorted <- jackknife_results[order(-jackknife_results$AIC_Deviation), ]
-  
-  # Print top 5
-  if (nrow(jackknife_results_sorted) > 0) {
-    top_influential <- head(jackknife_results_sorted, 5)
-    
-cat("\nSpecies causing the largest changes in AIC when dropped:\n\n")
-
-# Manual line-by-line output using cat
-for (i in 1:nrow(top_influential)) {
-  cat(sprintf(
-    "%d. %s | AIC: %.2f | LogLik: %.2f | AIC Deviation: %.2f\n",
-    i,
-    top_influential$Species_Dropped[i],
-    top_influential$AIC[i],
-    top_influential$LogLik[i],
-    top_influential$AIC_Deviation[i]
-  ))
-}
-    
-    cat("\nInterpretation: These species had the greatest impact on model fit when excluded.\n")
-    cat("High AIC deviation suggests they are influential, possibly due to unique traits or phylogenetic positions.\n")
-  } else {
-    cat("\nNo species showed measurable influence in AIC deviations.\n")
-  }
-}
-
-cat("\n=== Jackknife Analysis Complete ===\n")
-
-```
+cat("\n=== Done ===\nOutputs (PDF, CSV, NEWICK) are in:\n", out_dir, "\n")
