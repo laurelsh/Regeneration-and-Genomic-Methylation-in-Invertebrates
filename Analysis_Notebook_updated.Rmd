@@ -1,3 +1,4 @@
+```{r}
 ###############################################################################
 # Phylogenetic Comparative Analysis Script For Determining Relationship Between Genomic Methylation and Regeneration
 ###############################################################################
@@ -266,3 +267,4 @@ writeLines(capture.output(sessionInfo()), file.path(out_dir, "sessionInfo.txt"))
 cat("Wrote:", file.path(out_dir, "sessionInfo.txt"), "\n")
 
 cat("\n=== Done ===\nOutputs (PDF, CSV, NEWICK) are in:\n", out_dir, "\n")
+```
