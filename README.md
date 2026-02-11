@@ -43,7 +43,7 @@ Main steps:
 
 If using or adapting this repository, please cite:
 
-Hiebert, L. and Yi, S. PNAS (2025).
+Hiebert, L. and Yi, S. PNAS (2026).
 
 ## License
 
