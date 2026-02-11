@@ -1,6 +1,6 @@
 ###############################################################################
 # Phylogenetic Comparative Analysis
-# Runs PGLS on methylation vs regeneration for one tree.
+# Runs PGLS on methylation vs regeneration for one tree
 ###############################################################################
 
 library(ape)
@@ -12,7 +12,7 @@ library(ggplot2)
 library(rcompanion)
 
 # Load data and tree ----------------------------------------------------------
-# Set this to your local folder containing the data and trees:
+# Set to local folder containing the data and trees:
 base_dir <- "WRITE_YOUR_PATH_HERE"
 
 # Choose which tree to analyze (uncomment one)
@@ -67,13 +67,13 @@ p <- ggplot(df, aes(x = Regen, y = Methylation_Tukey)) +
     data = emm_ci,
     aes(x = Regen, ymin = lower.CL, ymax = upper.CL),
     width = 0.1, color = "black",
-    inherit.aes = FALSE   # <--- key line
+    inherit.aes = FALSE
   ) +
   geom_point(
     data = emm_ci,
     aes(x = Regen, y = emmean),
     size = 3, color = "black",
-    inherit.aes = FALSE   # <--- key line
+    inherit.aes = FALSE
   ) +
   theme_classic(base_size = 11) +
   labs(
