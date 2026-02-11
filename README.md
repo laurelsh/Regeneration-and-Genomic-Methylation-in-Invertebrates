@@ -1,6 +1,6 @@
 # Phylogenetic Comparative Analysis — Regeneration and CpG Methylation
 
-This repository contains the data and R scripts used to analyze relationships between genome-wide CpG methylation and regenerative capacity across metazoans.
+This repository contains the data and R scripts used to analyze relationships between genome-wide CpG methylation and regenerative capacity across invertebrates.
 
 ---
 
